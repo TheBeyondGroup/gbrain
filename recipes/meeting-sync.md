@@ -1,7 +1,7 @@
 ---
 id: meeting-sync
 name: Meeting Sync
-version: 0.7.0
+version: 0.7.1
 description: Meeting transcripts from Circleback auto-import into brain pages with attendee detection and entity propagation.
 category: sense
 requires: []
@@ -98,10 +98,20 @@ tags: [team, weekly, sync]
 
 ## Transcript
 
-**Alice Chen** (00:00): Let's start with the roadmap update...
-**Bob Park** (02:15): The prototype is basically done...
-**Carol Wu** (05:30): I have some design feedback on the new flow...
+**Alice Chen** (2026-04-10 9:00 AM): Let's start with the roadmap update...
+**Bob Park** (2026-04-10 9:02 AM): The prototype is basically done...
+**Carol Wu** (2026-04-10 9:05 AM): I have some design feedback on the new flow...
 ```
+
+> **Transcript format → facts.** The conversation-facts extractor parses each
+> line via gbrain's conversation-parser (12+ built-in formats + opt-in LLM
+> fallback). The safest meeting shape is the `imessage-slack` pattern — one turn
+> per line: `**<Speaker>** (YYYY-MM-DD H:MM AM/PM): <text>` (24h also works). A
+> `(MM:SS)`-only timestamp matches no pattern → 0 messages → 0 facts. Two more
+> gotchas: capture with **`--type meeting`** (the CLI flag wins; frontmatter
+> `type:` is only a fallback), and facts don't appear until
+> `gbrain extract-conversation-facts` runs the page — `import`/`capture` create
+> the page, not the facts.
 
 **Attendee filtering:**
 - Skip calendar resources (e.g., "YC-SF Conference Room")
@@ -332,8 +342,8 @@ tags: [sync]
 
 ## Transcript
 
-**Alice Chen** (00:00): Let's start with the roadmap...
-**Bob Park** (02:15): The prototype is basically done...
+**Alice Chen** (2026-04-10 9:00 AM): Let's start with the roadmap...
+**Bob Park** (2026-04-10 9:02 AM): The prototype is basically done...
 ```
 
 ### Git Commit After Sync
