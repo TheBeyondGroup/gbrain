@@ -887,6 +887,30 @@ const put_page: Operation = {
         },
         logger: ctx.logger,
       });
+
+      // TBG ingest-log fix: record the ingest event so capture-based ingestion
+      // (slack/linear/meeting crons → `gbrain capture` → put_page) is visible in
+      // get_ingest_log and the "what's the latest" freshness surface. Canonical
+      // gbrain logs ingest ONLY on import/sync — never on the capture/put_page
+      // write-through — so every captured page was silently absent from the
+      // ingest log, freezing "latest sync" at the last import/sync run while
+      // daily captures kept landing. Awaited (NOT the fire-and-forget facts
+      // queue) so the row lands before the CLI's finally-block disconnect that
+      // drops WARN-4 deferred writes. Non-fatal: a logging failure must never
+      // break a write that already succeeded.
+      try {
+        await ctx.engine.logIngest({
+          source_id: sourceId,
+          source_type: provenanceVia,
+          source_ref: result.slug,
+          pages_updated: [result.slug],
+          summary: `${result.status} ${result.slug}`,
+        });
+      } catch (e) {
+        ctx.logger.warn(
+          `[put_page] ingest-log write failed for ${result.slug}: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
     } else if (isSandboxSubagent) {
       writeThrough = { written: false, skipped: 'subagent_sandbox' };
     } else if (ctx.dryRun) {
