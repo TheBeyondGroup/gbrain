@@ -204,6 +204,17 @@ export interface BuildBrainToolsOpts {
    * must never widen beyond the dispatching client's own federation.
    */
   federatedRead?: readonly string[];
+  /**
+   * WRITE source for the subagent's put_page, sourced from the dispatching
+   * OAuth client's `bound_source_id` (stamped by submit_agent as
+   * `source_id` job data). Without it, writes land in the scalar 'default'
+   * source — which silently defeats source-level isolation for commissioned
+   * work (a client bound to write into source 'commissions' wrote into
+   * 'default', where every reader federates). Unset means the legacy
+   * 'default' write authority; this never widens — submit_agent only stamps
+   * the value from the client row, never from caller params.
+   */
+  sourceId?: string;
 }
 
 interface OpContextDeps {
@@ -215,6 +226,7 @@ interface OpContextDeps {
   brainId?: string;
   allowedSlugPrefixes?: readonly string[];
   federatedRead?: readonly string[];
+  sourceId?: string;
 }
 
 function buildOpContext(deps: OpContextDeps): OperationContext {
@@ -228,10 +240,12 @@ function buildOpContext(deps: OpContextDeps): OperationContext {
     },
     dryRun: false,
     remote: true,                // match MCP trust boundary for auto-link skip
-    sourceId: 'default',         // v0.34 D4: required; subagent tools default to host source
+    // WRITE authority: the dispatching client's bound_source_id when set
+    // (threaded from submit_agent's `source_id` job data), else the v0.34 D4
+    // 'default' host source. put_page is unaffected by read federation.
+    sourceId: deps.sourceId ?? 'default',
     // Read federation from the dispatching client (sourceScopeOpts prefers
-    // this over the scalar sourceId above). sourceId stays 'default' as the
-    // WRITE authority — put_page is unaffected by read federation.
+    // this over the scalar sourceId above).
     allowedSources: deps.federatedRead && deps.federatedRead.length > 0
       ? [...deps.federatedRead]
       : undefined,
@@ -288,6 +302,7 @@ export function buildBrainTools(opts: BuildBrainToolsOpts): ToolDef[] {
           brainId: opts.brainId,
           allowedSlugPrefixes: opts.allowedSlugPrefixes,
           federatedRead: opts.federatedRead,
+          sourceId: opts.sourceId,
         });
         const params = (input && typeof input === 'object') ? input as Record<string, unknown> : {};
         return op.handler(opCtx, params);

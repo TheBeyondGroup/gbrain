@@ -460,6 +460,15 @@ export interface SubagentHandlerData {
    */
   __federated_read?: string[];
   /**
+   * WRITE source for the subagent's put_page, stamped by submit_agent from
+   * the dispatching OAuth client's `oauth_clients.bound_source_id`. Flows
+   * buildBrainTools → OperationContext.sourceId so agent writes land in the
+   * bound source instead of collapsing to 'default' (which would defeat
+   * source-level isolation of commissioned output). Authoritative from the
+   * client row at submission time — callers cannot set or override it.
+   */
+  source_id?: string;
+  /**
    * v0.41 Approach C: opt out of the auto-generated tool-usage preamble
    * that `buildSystemPrompt()` splices into `system`. Default behavior
    * (omitted or false) prepends a deterministic preamble listing each
