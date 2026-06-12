@@ -450,6 +450,16 @@ export interface SubagentHandlerData {
    */
   allowed_slug_prefixes?: string[];
   /**
+   * Read federation for the subagent's brain tools, stamped by submit_agent
+   * from the dispatching OAuth client's `oauth_clients.federated_read`.
+   * Flows buildBrainTools → OperationContext.allowedSources so read ops
+   * federate across the listed sources instead of collapsing to the scalar
+   * `sourceId: 'default'`. The `__` prefix marks it as dispatcher-stamped
+   * (like `__owner_client_id`): callers must not set it directly — the
+   * value is authoritative from the client row at submission time.
+   */
+  __federated_read?: string[];
+  /**
    * v0.41 Approach C: opt out of the auto-generated tool-usage preamble
    * that `buildSystemPrompt()` splices into `system`. Default behavior
    * (omitted or false) prepends a deterministic preamble listing each

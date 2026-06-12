@@ -286,6 +286,17 @@ export interface OperationContext {
    */
   auth?: AuthInfo;
   /**
+   * First-class read federation for non-OAuth entry points (the subagent
+   * dispatcher). The subagent tool context has no AuthInfo — tools run
+   * in-process in the worker — but the dispatching OAuth client's
+   * `federated_read` must still bound what the agent can read.
+   * `sourceScopeOpts` consults this AFTER `auth.allowedSources` (an
+   * authenticated transport's grant always wins) and BEFORE the scalar
+   * `sourceId` fallback. Empty array means "no federation" (scalar
+   * sourceId applies), mirroring `AuthInfo.allowedSources` semantics.
+   */
+  allowedSources?: string[];
+  /**
    * True when the caller is remote/untrusted (MCP over stdio/HTTP, or any agent-facing entry point).
    * False for local CLI invocations by the owner of the machine.
    *
@@ -421,6 +432,10 @@ export function sourceScopeOpts(ctx: OperationContext): { sourceId?: string; sou
   // value of `[]` MUST NOT widen scope to "all sources" by being interpreted
   // as "no filter."
   if (allowed && allowed.length > 0) return { sourceIds: allowed };
+  // Subagent dispatcher path: no AuthInfo (tools run in-process), but the
+  // dispatching client's federated_read is threaded onto the context
+  // first-class. Same empty-array-must-not-widen rule as above.
+  if (ctx.allowedSources && ctx.allowedSources.length > 0) return { sourceIds: ctx.allowedSources };
   if (ctx.sourceId) return { sourceId: ctx.sourceId };
   return {};
 }
@@ -2794,7 +2809,8 @@ const submit_agent: Operation = {
     try {
       bindingRows = await sql`
         SELECT bound_tools, bound_source_id, bound_brain_id, bound_slug_prefixes,
-               bound_max_concurrent, budget_usd_per_day::text AS budget_cap
+               bound_max_concurrent, budget_usd_per_day::text AS budget_cap,
+               federated_read
           FROM oauth_clients
          WHERE client_id = ${clientId}
       `;
@@ -2813,6 +2829,7 @@ const submit_agent: Operation = {
     const boundSlugPrefixes = (binding.bound_slug_prefixes as string[] | null) ?? null;
     const boundMaxConcurrent = Number(binding.bound_max_concurrent ?? 1);
     const budgetCapText = (binding.budget_cap as string | null) ?? null;
+    const federatedRead = (binding.federated_read as string[] | null) ?? [];
 
     if (boundTools === null) {
       throw new OperationError(
@@ -2883,6 +2900,11 @@ const submit_agent: Operation = {
       allowed_tools: requestedTools,
       allowed_slug_prefixes: requestedSlugPrefixes,
       __owner_client_id: clientId,
+      // Read federation for the subagent's brain tools. Without this the
+      // tool context falls back to scalar sourceId='default' and the agent
+      // is blind to every other source on the brain (pods stamp content
+      // into linear/slack/<client> sources — 'default' is near-empty there).
+      __federated_read: federatedRead,
     };
     if (typeof p.model === 'string') jobData.model = p.model;
     if (boundSource) jobData.source_id = boundSource;
@@ -2913,6 +2935,47 @@ const submit_agent: Operation = {
     } catch { /* never block submission */ }
 
     return { id: job.id, name: 'subagent', client_id: clientId };
+  },
+};
+
+// Owner-scoped retrieval companion to submit_agent. get_job/get_job_progress
+// are admin-only, and `agent` is a deliberate scope SIBLING (v0.38 D13:
+// admin does not imply agent and agent implies nothing) — so without this
+// op a dispatch-only client can submit jobs it can never read back. The
+// owner check is the trust boundary: a client sees exactly the jobs it
+// submitted (matched on the __owner_client_id stamp), nothing else.
+const get_agent_job: Operation = {
+  name: 'get_agent_job',
+  description: 'Get status and result of an agent job submitted by THIS client (requires the `agent` OAuth scope; owner-checked against the submitting client_id).',
+  params: {
+    id: { type: 'number', required: true, description: 'Job ID returned by submit_agent' },
+  },
+  scope: 'agent' as any,
+  handler: async (ctx, p) => {
+    const clientId = (ctx as { auth?: { clientId?: string } }).auth?.clientId;
+    if (!clientId || typeof clientId !== 'string') {
+      throw new OperationError('permission_denied', 'get_agent_job requires an OAuth client with the `agent` scope.');
+    }
+    const { MinionQueue } = await import('./minions/queue.ts');
+    const queue = new MinionQueue(ctx.engine);
+    const job = await queue.getJob(p.id as number);
+    // Same error for "not found" and "not yours" — do not leak job-id
+    // existence across clients.
+    const owner = (job?.data as Record<string, unknown> | undefined)?.__owner_client_id;
+    if (!job || job.name !== 'subagent' || owner !== clientId) {
+      throw new OperationError('invalid_params', `No agent job ${p.id} for this client.`);
+    }
+    return {
+      id: job.id,
+      status: job.status,
+      result: job.result ?? null,
+      error_text: job.error_text ?? null,
+      attempts_made: job.attempts_made,
+      tokens_input: job.tokens_input ?? 0,
+      tokens_output: job.tokens_output ?? 0,
+      created_at: job.created_at,
+      finished_at: job.finished_at ?? null,
+    };
   },
 };
 
@@ -4867,7 +4930,7 @@ export const operations: Operation[] = [
   submit_job, get_job, list_jobs, cancel_job, retry_job, get_job_progress,
   pause_job, resume_job, replay_job, send_job_message,
   // v0.38 Slice 3: remote-callable agent dispatch with OAuth-bound trust boundary
-  submit_agent,
+  submit_agent, get_agent_job,
   // Orphans
   find_orphans,
   // v0.36.1.0 (T7) — Hindsight calibration wave: read profile via MCP
