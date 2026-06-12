@@ -194,6 +194,16 @@ export interface BuildBrainToolsOpts {
    * SubagentHandlerData.allowed_slug_prefixes via the handler.
    */
   allowedSlugPrefixes?: readonly string[];
+  /**
+   * Read federation for the subagent's tools, sourced from the dispatching
+   * OAuth client's `federated_read` (threaded by submit_agent as
+   * `__federated_read` job data). Without it, tool reads collapse to the
+   * scalar `sourceId: 'default'` below — on a brain whose content lives in
+   * other sources (pods stamp into linear/slack/<client>) the agent reads
+   * nothing. Empty/unset means exactly that scalar fallback; this list
+   * must never widen beyond the dispatching client's own federation.
+   */
+  federatedRead?: readonly string[];
 }
 
 interface OpContextDeps {
@@ -204,6 +214,7 @@ interface OpContextDeps {
   signal?: AbortSignal;
   brainId?: string;
   allowedSlugPrefixes?: readonly string[];
+  federatedRead?: readonly string[];
 }
 
 function buildOpContext(deps: OpContextDeps): OperationContext {
@@ -218,6 +229,12 @@ function buildOpContext(deps: OpContextDeps): OperationContext {
     dryRun: false,
     remote: true,                // match MCP trust boundary for auto-link skip
     sourceId: 'default',         // v0.34 D4: required; subagent tools default to host source
+    // Read federation from the dispatching client (sourceScopeOpts prefers
+    // this over the scalar sourceId above). sourceId stays 'default' as the
+    // WRITE authority — put_page is unaffected by read federation.
+    allowedSources: deps.federatedRead && deps.federatedRead.length > 0
+      ? [...deps.federatedRead]
+      : undefined,
     jobId: deps.jobId,
     subagentId: deps.subagentId,
     viaSubagent: true,           // FAIL-CLOSED: put_page etc. enforce namespace
@@ -270,6 +287,7 @@ export function buildBrainTools(opts: BuildBrainToolsOpts): ToolDef[] {
           signal: ctx.signal,
           brainId: opts.brainId,
           allowedSlugPrefixes: opts.allowedSlugPrefixes,
+          federatedRead: opts.federatedRead,
         });
         const params = (input && typeof input === 'object') ? input as Record<string, unknown> : {};
         return op.handler(opCtx, params);
