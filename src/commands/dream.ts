@@ -583,18 +583,27 @@ export async function runDream(engine: BrainEngine | null, args: string[]): Prom
 
   const phases: CyclePhase[] | undefined = opts.phase ? [opts.phase] : undefined;
 
-  const report = await runCycle(engine, {
-    brainDir,
-    dryRun: opts.dryRun,
-    pull: opts.pull,
-    phases,
-    sourceId: resolvedSourceId, // undefined when --source not set → legacy back-compat
-    synthInputFile: opts.inputFile ?? undefined,
-    synthDate: opts.date ?? undefined,
-    synthFrom: opts.from ?? undefined,
-    synthTo: opts.to ?? undefined,
-    synthBypassDreamGuard: opts.bypassDreamGuard,
-  });
+  // TBG-281 Phase A: record this dream run's backend LLM spend to mcp_spend_log
+  // under the @service:dream identity (observation only — never caps). The
+  // nightly dream crons run the heavy phases (synthesize/patterns/propose_takes/
+  // grade_takes/calibration) here; this is the spend that was previously invisible.
+  const { withBackendSpendTracking } = await import('../core/budget/backend-spend.ts');
+  const report = await withBackendSpendTracking(
+    engine,
+    { clientId: '@service:dream', operation: `dream:${opts.phase ?? 'cycle'}` },
+    () => runCycle(engine, {
+      brainDir,
+      dryRun: opts.dryRun,
+      pull: opts.pull,
+      phases,
+      sourceId: resolvedSourceId, // undefined when --source not set → legacy back-compat
+      synthInputFile: opts.inputFile ?? undefined,
+      synthDate: opts.date ?? undefined,
+      synthFrom: opts.from ?? undefined,
+      synthTo: opts.to ?? undefined,
+      synthBypassDreamGuard: opts.bypassDreamGuard,
+    }),
+  );
 
   if (opts.json) {
     console.log(JSON.stringify(report, null, 2));
