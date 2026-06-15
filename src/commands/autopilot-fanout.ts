@@ -84,6 +84,37 @@ export async function resolveFanoutMax(engine: BrainEngine): Promise<number> {
 }
 
 /**
+ * Resolve the phase list stamped onto autopilot-cycle jobs, honoring the
+ * `autopilot.exclude_phases` config (comma-separated phase names).
+ *
+ * Default (unset/empty) → returns null, and the autopilot-cycle handler
+ * falls back to ALL_PHASES — i.e. behavior is unchanged unless an operator
+ * opts in. When set, returns ALL_PHASES minus the excluded phases, so the
+ * every-tick autopilot cycle runs only cheap maintenance while the heavy
+ * LLM phases (propose_takes, grade_takes, synthesize, patterns, …) are left
+ * to the nightly `gbrain dream --phase X` crons.
+ *
+ * Why (TBG-281): the autopilot cycle runs ALL_PHASES every tick. propose_takes
+ * re-scans the 50 most-recent pages on EVERY run with no already-processed
+ * skip — idempotent on output (take_proposals dedup) but paying full LLM
+ * input each run. On a hot fleet that was ~$150/day for ~0 new output. An
+ * explicit `gbrain dream --phase X` bypasses this entirely (it routes through
+ * dream.ts, not the fanout), so the nightly cron still runs the excluded
+ * phases — coverage is preserved, only the cadence moves.
+ */
+export async function resolveCyclePhases(engine: BrainEngine): Promise<string[] | null> {
+  const raw = await engine.getConfig('autopilot.exclude_phases');
+  if (!raw) return null;
+  const exclude = new Set(raw.split(',').map((s) => s.trim()).filter(Boolean));
+  if (exclude.size === 0) return null;
+  const { ALL_PHASES } = await import('../core/cycle.ts');
+  const phases = (ALL_PHASES as readonly string[]).filter((p) => !exclude.has(p));
+  // Defensive: a typo'd config that excludes everything falls back to
+  // ALL_PHASES (null) rather than submitting an empty no-op cycle.
+  return phases.length > 0 ? phases : null;
+}
+
+/**
  * Read `last_full_cycle_at` ISO string from a source's config JSONB.
  * Returns null when missing or unparseable. Pure function over the row
  * shape `listAllSources` returns (config is already a parsed object).
@@ -161,6 +192,12 @@ export async function dispatchPerSource(
   const emit = opts.emit ?? ((line) => process.stderr.write(line + '\n'));
   const log = opts.log ?? ((line) => console.log(line));
 
+  // TBG-281: optional per-tick phase exclusion (config autopilot.exclude_phases).
+  // null = unchanged (handler defaults to ALL_PHASES). Stamped onto every
+  // autopilot-cycle job below; the nightly dream crons run excluded phases
+  // explicitly via `gbrain dream --phase X`.
+  const cyclePhases = await resolveCyclePhases(engine);
+
   let sources: SourceRow[];
   try {
     sources = await engine.listAllSources({ localPathOnly: true });
@@ -179,7 +216,7 @@ export async function dispatchPerSource(
     // (default source) and pre-v0.18 brains without the sources table.
     const job = await queue.add(
       'autopilot-cycle',
-      { repoPath: opts.repoPath },
+      { repoPath: opts.repoPath, ...(cyclePhases ? { phases: cyclePhases } : {}) },
       {
         queue: 'default',
         idempotency_key: `autopilot-cycle:${opts.slot}`,
@@ -208,6 +245,7 @@ export async function dispatchPerSource(
           repoPath: opts.repoPath,
           source_id: src.id,
           pull: !!remoteUrl,
+          ...(cyclePhases ? { phases: cyclePhases } : {}),
         },
         {
           queue: 'default',

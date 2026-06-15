@@ -17,6 +17,7 @@ import {
   selectSourcesForDispatch,
   resolveFanoutMax,
   dispatchPerSource,
+  resolveCyclePhases,
 } from '../src/commands/autopilot-fanout.ts';
 import type { SourceRow, BrainEngine } from '../src/core/engine.ts';
 
@@ -163,6 +164,9 @@ describe('dispatchPerSource — integration with stubbed engine + queue', () => 
     let nextId = 100;
     const engine = {
       kind: 'postgres' as const,
+      // TBG-281: dispatchPerSource now reads autopilot.exclude_phases via
+      // resolveCyclePhases; null keeps the legacy ALL_PHASES behavior.
+      getConfig: async () => null,
       listAllSources: async () => {
         if (opts?.listThrows) throw new Error('sources table missing');
         return sources;
@@ -250,6 +254,7 @@ describe('dispatchPerSource — integration with stubbed engine + queue', () => 
     let nextId = 100;
     const engine = {
       kind: 'postgres' as const,
+      getConfig: async () => null,
       listAllSources: async () => sources,
     } as unknown as BrainEngine;
     const queue = {
@@ -306,5 +311,37 @@ describe('dispatchPerSource — integration with stubbed engine + queue', () => 
     expect(result.dispatched.length).toBe(0);
     expect(result.skipped_fresh.length).toBe(2);
     expect(added.length).toBe(0);
+  });
+});
+
+describe('resolveCyclePhases (TBG-281 autopilot.exclude_phases)', () => {
+  const engineWith = (cfg: string | null): BrainEngine =>
+    ({ getConfig: async (k: string) => (k === 'autopilot.exclude_phases' ? cfg : null) } as unknown as BrainEngine);
+
+  test('unset → null (unchanged: handler defaults to ALL_PHASES)', async () => {
+    expect(await resolveCyclePhases(engineWith(null))).toBeNull();
+  });
+
+  test('empty / whitespace → null', async () => {
+    expect(await resolveCyclePhases(engineWith(''))).toBeNull();
+    expect(await resolveCyclePhases(engineWith('  , ,'))).toBeNull();
+  });
+
+  test('excludes the named heavy phases, keeps cheap maintenance', async () => {
+    const phases = await resolveCyclePhases(engineWith('propose_takes, grade_takes, calibration_profile'));
+    expect(phases).not.toBeNull();
+    expect(phases).not.toContain('propose_takes');
+    expect(phases).not.toContain('grade_takes');
+    expect(phases).not.toContain('calibration_profile');
+    // cheap maintenance still runs every tick
+    expect(phases).toContain('lint');
+    expect(phases).toContain('backlinks');
+    expect(phases).toContain('embed');
+  });
+
+  test('excluding every phase falls back to null (no empty no-op cycle)', async () => {
+    const { ALL_PHASES } = await import('../src/core/cycle.ts');
+    const all = (ALL_PHASES as readonly string[]).join(',');
+    expect(await resolveCyclePhases(engineWith(all))).toBeNull();
   });
 });
