@@ -1640,17 +1640,26 @@ export async function registerBuiltinHandlers(
     // Pull default: legacy `true` for back-compat; explicit boolean wins.
     const pull = typeof job.data.pull === 'boolean' ? job.data.pull : true;
 
-    const report = await runCycle(engine, {
-      brainDir: repoPath,
-      pull,
-      signal: job.signal, // propagate abort so cycle bails on timeout/cancel
-      ...(sourceId ? { sourceId } : {}),
-      ...(requestedPhases && requestedPhases.length > 0 ? { phases: requestedPhases as any } : {}),
-      yieldBetweenPhases: async () => {
-        // Yield to the event loop so worker lock-renewal can fire.
-        await new Promise<void>(r => setImmediate(r));
-      },
-    });
+    // TBG-281 Phase A: record this cycle's backend LLM spend to mcp_spend_log
+    // under @service:autopilot (observation only). Post-exclude the autopilot
+    // cycle is cheap (heavy phases run nightly via dream), so this is usually a
+    // no-op (zero spend → no row), but it makes any regression visible.
+    const { withBackendSpendTracking } = await import('../core/budget/backend-spend.ts');
+    const report = await withBackendSpendTracking(
+      engine,
+      { clientId: '@service:autopilot', operation: 'autopilot-cycle' },
+      () => runCycle(engine, {
+        brainDir: repoPath,
+        pull,
+        signal: job.signal, // propagate abort so cycle bails on timeout/cancel
+        ...(sourceId ? { sourceId } : {}),
+        ...(requestedPhases && requestedPhases.length > 0 ? { phases: requestedPhases as any } : {}),
+        yieldBetweenPhases: async () => {
+          // Yield to the event loop so worker lock-renewal can fire.
+          await new Promise<void>(r => setImmediate(r));
+        },
+      }),
+    );
 
     return {
       partial: report.status === 'partial' || report.status === 'failed',
