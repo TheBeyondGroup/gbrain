@@ -318,6 +318,19 @@ class ProposeTakesPhase extends BaseCyclePhase {
       warnings: [],
     };
 
+    // TBG-281: resolve the extraction model from config instead of the
+    // hardcoded sonnet-4-6 below. Mirrors patterns.ts (v0.28 unified model
+    // resolution). Default tier 'reasoning' = sonnet-4-6 → behavior-neutral
+    // unless `models.dream.takes` is set; TBG sets it to Haiku per-brain to
+    // cut the dominant nightly cost (propose_takes was ~all the Sonnet spend).
+    // opts.model (tests / explicit override) still wins.
+    const { resolveModel } = await import('../model-config.ts');
+    const modelId = opts.model ?? await resolveModel(engine, {
+      configKey: 'models.dream.takes',
+      tier: 'reasoning',
+      fallback: 'sonnet',
+    });
+
     // Load pages eligible for proposal. Source-scoped per BaseCyclePhase.
     const pageFilters: PageFilters = {
       ...scope,
@@ -359,7 +372,7 @@ class ProposeTakesPhase extends BaseCyclePhase {
 
       // Budget pre-check before the LLM call. Estimate: ~1500 input tokens + 500 output.
       const budget = this.checkBudget({
-        modelId: opts.model ?? 'claude-sonnet-4-6',
+        modelId: modelId,
         estimatedInputTokens: 1500,
         maxOutputTokens: 500,
       });
@@ -408,7 +421,7 @@ class ProposeTakesPhase extends BaseCyclePhase {
             p.weight,
             p.domain ?? null,
             JSON.stringify(existingTakes),
-            opts.model ?? 'claude-sonnet-4-6',
+            modelId,
           ],
         );
         result.proposals_inserted += 1;
