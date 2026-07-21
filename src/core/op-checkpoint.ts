@@ -122,11 +122,21 @@ export async function loadOpCheckpoint(
     // dedupes, so we skip a server-side dedup sort over up to 204K rows on every
     // resume. `jsonb_array_elements_text` expands the legacy array server-side,
     // which also removes the old postgres.js-vs-PGLite string/array handling.
+    //
+    // The CASE unwraps rows corrupted by the pre-fix recordCompleted (a JSONB
+    // *string* holding the serialized array — postgres.js double-stringify, the
+    // v0.12.0 bug class): `#>> '{}'` extracts the inner text, `::jsonb` parses
+    // it back to a real array. Healthy rows pass through untouched, so corrupt
+    // checkpoints self-heal on first read and the next save rewrites them clean.
     const rows = await engine.executeRaw<{ ckey: unknown }>(
       `SELECT path AS ckey FROM op_checkpoint_paths
          WHERE op = $1 AND fingerprint = $2
        UNION ALL
-       SELECT jsonb_array_elements_text(completed_keys) AS ckey FROM op_checkpoints
+       SELECT jsonb_array_elements_text(
+                CASE WHEN jsonb_typeof(completed_keys) = 'string'
+                     THEN (completed_keys #>> '{}')::jsonb
+                     ELSE completed_keys END
+              ) AS ckey FROM op_checkpoints
          WHERE op = $1 AND fingerprint = $2`,
       [key.op, key.fingerprint],
     );
@@ -158,18 +168,26 @@ export async function recordCompleted(
   // extract-conversation-facts serialize a MUTABLE map through here and rely on
   // stale keys being REMOVED; an append would make them unremovable. The full
   // set lands in the parent `completed_keys` JSONB column via a single UPSERT —
-  // exactly as before. JSON.stringify into `$3::jsonb` is correct (the text→jsonb
-  // cast yields a proper array; NOT the double-encode trap, which is the template
-  // form). Sync uses `appendCompleted` (below) instead, never this.
+  // exactly as before.
+  //
+  // Bind the keys as a text[] and build the array server-side with to_jsonb —
+  // the same driver-safe pattern as APPEND_PATHS_SQL above. Do NOT pass
+  // JSON.stringify(keys) into a `::jsonb` placeholder: postgres.js Describes
+  // the param as jsonb and runs its jsonb serializer (JSON.stringify) over the
+  // already-serialized string, storing a JSONB *string* instead of an array.
+  // Every subsequent load then died on `jsonb_array_elements_text` ("cannot
+  // extract elements from a scalar") → ops forgot all progress and re-ran from
+  // zero each night. PGLite hid the bug (no Describe-driven serialization),
+  // which is why the PGLite suite stayed green while prod churned.
   const sorted = [...keys].sort();
   return durableWrite(engine, key, 'write', () =>
     engine.executeRawDirect(
       `INSERT INTO op_checkpoints (op, fingerprint, completed_keys, updated_at)
-       VALUES ($1, $2, $3::jsonb, now())
+       VALUES ($1, $2, to_jsonb($3::text[]), now())
        ON CONFLICT (op, fingerprint) DO UPDATE
          SET completed_keys = EXCLUDED.completed_keys,
              updated_at     = now()`,
-      [key.op, key.fingerprint, JSON.stringify(sorted)],
+      [key.op, key.fingerprint, sorted],
     ));
 }
 

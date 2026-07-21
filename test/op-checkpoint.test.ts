@@ -141,6 +141,36 @@ describe('loadOpCheckpoint / recordCompleted / clearOpCheckpoint', () => {
     const after = await loadOpCheckpoint(engine, { op: 'never-written', fingerprint: 'nope' });
     expect(after).toEqual([]);
   });
+
+  test('recordCompleted stores a JSONB array, not a serialized string', async () => {
+    // The pre-fix write passed JSON.stringify(keys) into a `::jsonb` param;
+    // postgres.js Describe-serialized it AGAIN, storing a JSONB string. Pin the
+    // stored type server-side so a regression fails on both engines.
+    const key = { op: 'embed', fingerprint: 'jsonb-shape' };
+    await recordCompleted(engine, key, ['chunk-1', 'chunk-2']);
+    const rows = await engine.executeRaw<{ jtype: string }>(
+      `SELECT jsonb_typeof(completed_keys) AS jtype FROM op_checkpoints
+        WHERE op = $1 AND fingerprint = $2`,
+      [key.op, key.fingerprint],
+    );
+    expect(rows[0]?.jtype).toBe('array');
+  });
+
+  test('load self-heals legacy double-encoded rows (JSONB string)', async () => {
+    // Rows written by the buggy recordCompleted hold the serialized array as a
+    // JSONB *string*. The loader must unwrap them instead of dying on
+    // jsonb_array_elements_text ("cannot extract elements from a scalar") —
+    // that failure made every nightly op forget all progress and re-run from
+    // zero (the facts-churn incident).
+    const key = { op: 'extract-conversation-facts', fingerprint: 'legacycor' };
+    await engine.executeRaw(
+      `INSERT INTO op_checkpoints (op, fingerprint, completed_keys, updated_at)
+       VALUES ($1, $2, to_jsonb($3::text), now())`,
+      [key.op, key.fingerprint, JSON.stringify(['slack|a|1', 'slack|b|2'])],
+    );
+    const result = await loadOpCheckpoint(engine, key);
+    expect(result.sort()).toEqual(['slack|a|1', 'slack|b|2']);
+  });
 });
 
 // #1794: append-only delta storage (op_checkpoint_paths). recordCompleted keeps
